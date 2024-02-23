@@ -42,7 +42,7 @@ int initMemoirePartageeLecteur(const char* identifiant,
 
     
 
-    return 1; //retourne 1 mais a verifier
+    return 0; //retourne 1 mais a verifier
 
 }
 
@@ -52,42 +52,99 @@ int initMemoirePartageeEcrivain(const char* identifiant,
                                 size_t taille,
                                 struct memPartageHeader* headerInfos)
 {
-    zone->fd = shm_open(identifiant, O_WRONLY, S_IWUSR);
+    zone->fd = shm_open(identifiant, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
     if (zone->fd == -1)
     {
         perror("erreur : initMemoirePartageeLecteur");
+        return -1;
     }
     if (ftruncate(zone->fd, taille) == -1)
     {
         perror("erreur avec ftruncate");
+        close(zone->fd);
+        return -1;
     }
-    zone->tailleDonnees = taille;
-    zone->header = headerInfos;
-    
-    if (pthread_mutex_init(&headerInfos->mutex, NULL) != 0)
+ 
+    zone->header = (struct memPartageHeader*)mmap(NULL, taille, PROT_READ | PROT_WRITE, MAP_SHARED, zone->fd, 0);
+    if (zone->header == MAP_FAILED)
     {
-        perror("erreur avec l'init du mutex");
+        perror("erreur avec mmap");
+        close(zone->fd); 
+        return -1; 
     }
-    pthread_mutex_lock(&headerInfos->mutex);
-    zone->copieCompteur++;
 
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
 
-    
+    if (pthread_mutex_init(&(zone->header->mutex), &attr) != 0)
+    {
+        perror("Erreur lors de l'initialisation du mutex inter-processus");
+        munmap(zone->header, taille);
+        close(zone->fd);
+        pthread_mutexattr_destroy(&attr); 
+        return -1;
+    }
+
+    pthread_mutexattr_destroy(&attr); 
+
+    if (headerInfos != NULL) {
+        memcpy(zone->header, headerInfos, sizeof(struct memPartageHeader));
+    } else {
+        memset(zone->header, 0, sizeof(struct memPartageHeader));
+    }
+    zone->tailleDonnees = taille - sizeof(struct memPartageHeader);
+    zone->data = (unsigned char*)((char*)zone->header + sizeof(struct memPartageHeader));
+    return 0; // Succès
+
 }
 
 // Appelé par le lecteur pour se mettre en attente d'un résultat
 int attenteLecteur(struct memPartage *zone)
 {
-    ;
+    if (zone == NULL || zone->header == NULL) {
+        perror("Zone mémoire non initialisée ou pointeur NULL");
+        return -1;
+    }
+
+  
+    while (zone->header->frameReader == zone->header->frameWriter) {
+        sched_yield(); 
+    }
+
+    zone->header->frameReader = zone->header->frameWriter;
+
+    return 0;
 }
 // Fonction spéciale similaire à attenteLecteur, mais asynchrone : cette fonction ne bloque jamais.
 // Cela est utile pour le compositeur, qui ne doit pas bloquer l'entièreté des flux si un seul est plus lent.
-int attenteLecteurAsync(struct memPartage *zone)
-{
-    ;
+int attenteLecteurAsync(struct memPartage *zone) {
+    // Vérifie que la zone mémoire est correctement initialisée.
+    if (zone == NULL || zone->header == NULL) {
+        perror("Zone mémoire non initialisée ou pointeur NULL");
+        return -1;
+    }
+
+    if (zone->header->frameReader != zone->header->frameWriter) {
+        zone->header->frameReader = zone->header->frameWriter;
+        return 0;
+    } else {
+       perror("La trame n'est pas encore prête");
+       return -2;
+    }
 }
 // Appelé par l'écrivain pour se mettre en attente de la lecture du résultat précédent par un lecteur
 int attenteEcrivain(struct memPartage *zone)
 {
-    ;
+    if (zone == NULL || zone->header == NULL) {
+        perror("Zone mémoire non initialisée ou pointeur NULL");
+        return -1;
+    }
+
+    while (zone->header->frameReader != zone->header->frameWriter) {
+        sched_yield(); 
+    }
+
+    return 0;
+
 }
